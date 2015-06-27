@@ -1,0 +1,3 @@
+[submodule "avr-uart"]
+	path = avr-uart
+	url = https://github.com/FlechaMaker/avr-uart.git
