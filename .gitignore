@@ -2,4 +2,6 @@
 *.elf
 *.hex
 *.map
-
+.linter-clang-includes
+dump.S
+test/dump.S
