@@ -12,9 +12,11 @@
 /*
  * Macros and constants
  */
-#define FEP_LINE_LEN 150
+#define FEP_LINE_LEN 273 /* 256(=maximam data length)+14(=header length)+2(=CRLF)+1(=null character) */
 #define FEP_TIMEOUT_MS 4000
 #define FEP_RETRY 10
+
+#define FEP_SERIAL_TIMEOUT 5000
 
 /*
  * private function prototypes
@@ -70,16 +72,21 @@ Return:
 ******************************************************************************/
 int FEP_io_putchar(char c, FILE *stream);
 
+/******************************************************************************
+Function: FEP_fgets()
+Purpose:  get string (for internal use)
+Params:   stream
+Return:   received character from UART
+******************************************************************************/
+char *FEP_fgets(char * s, int n, FILE * stream);
+
 /*
  *  Module global variables
  */
 static volatile int16_t FEP_intensity;
-static volatile uint8_t FEP_busyFlag;
-static volatile uint8_t FEP_lastRxData;
-static volatile uint8_t FEP_availablePacket;
-static volatile uint8_t FEP_currentByte;
-static volatile uint8_t FEP_prevByte;
-static volatile uint16_t FEP_discardableByte;
+static volatile uint8_t FEP_availableFlag;
+static volatile char FEP_latestPacket[FEP_LINE_LEN];
+static volatile uint8_t FEP_transmitterAddr;
 void (*FEP_uart_init)(uint16_t baudrate);
 void (*FEP_uart_setRxHandler)(void (*func)(uint8_t data, uint8_t lastRxError));
 uint16_t (*FEP_uart_getc)(void);
@@ -101,13 +108,13 @@ void FEP_init(
     uint8_t ch3,
     uint16_t id)
 {
+    /* disable interrupt */
+    cli();
+
     /* initialize global variables */
     FEP_intensity = 0;
-    FEP_busyFlag = 0;
-    FEP_availablePacket = 0;
-    FEP_currentByte = 0;
-    FEP_prevByte = 0;
-    FEP_discardableByte = 0;
+    FEP_availableFlag = 0;
+    FEP_transmitterAddr = 0;
 
     /* set uart functions */
     switch (module) {
@@ -166,26 +173,31 @@ void FEP_init(
     /* Set additional rx interrupt handler */
     (*FEP_uart_setRxHandler)(FEP_rxHandler);
 
-    /* Add intensity to response */
-    FEP_setReg(13, (1 << 7));
+    /* enable interrupt */
+    sei();
 
-    FEP_setMyAddr(addr);
-    FEP_setFrq(ch1, ch2, ch3);
-    FEP_setID(id);
+    /* wait until fep starts */
+    _delay_ms(60);
+
+    /* Add intensity to response */
+    //FEP_setReg(13, (1 << 7));
+
+    //FEP_setMyAddr(addr);
+    //FEP_setFrq(ch1, ch2, ch3);
+    //FEP_setID(id);
 }
 
 uint8_t FEP_puts(char *str, uint8_t addr) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@TXT%03d%s\r\n"), addr, str);
 
         response = FEP_waitResponse();
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
+
+    _delay_us(100);
 
     return response;
 }
@@ -193,8 +205,6 @@ uint8_t FEP_puts(char *str, uint8_t addr) {
 uint8_t FEP_putbin(char *ary, size_t len, uint8_t addr) {
     uint8_t response, i, j;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@TBN%03d%03d"), addr, len);
         for (j = 0; j < len; j++) {
@@ -206,21 +216,20 @@ uint8_t FEP_putbin(char *ary, size_t len, uint8_t addr) {
         response = FEP_waitResponse();
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
+
+    _delay_us(100);
 
     return response;
 }
 
 uint8_t FEP_gets(char *str, size_t len) {
     uint16_t intensity, i;
-    uint8_t transmitter_addr, data_mode;
+    uint8_t data_mode;
     size_t data_len;
     char buf[FEP_LINE_LEN], sub[FEP_LINE_LEN];
 
     /* skip over old datas */
-    FEP_flushAVR(FEP_discardableByte);
-    fgets(buf, FEP_LINE_LEN, &fepio);
-    FEP_availablePacket = 0;
+    if (FEP_fgets(buf, FEP_LINE_LEN, &fepio) == NULL) return FEP_DT_ERR;
 
     /* Parse command */
     if (strlen(buf) >= 3) {
@@ -233,7 +242,7 @@ uint8_t FEP_gets(char *str, size_t len) {
             sub[strlen(buf) - 3 - 2 + 1] = '\0';
 
             /* Get transmitter's address */
-            sscanf_P(sub, PSTR("RXT%03d"), &transmitter_addr);
+            sscanf_P(sub, PSTR("RXT%03d"), &FEP_transmitterAddr);
             /* Store message to str */
             strncpy(str, buf + 6, strlen(buf) - 6 - 3 - 2);
 
@@ -248,7 +257,7 @@ uint8_t FEP_gets(char *str, size_t len) {
             sub[6] = '\0';
 
             /* Get transmitter's address & data length */
-            sscanf_P(sub, PSTR("%03d%03d"), &transmitter_addr, &data_len);
+            sscanf_P(sub, PSTR("%03d%03d"), &FEP_transmitterAddr, &data_len);
             /* Store binary data to array */
             if (data_len > len) {
                 /* received data is too long! */
@@ -274,11 +283,13 @@ uint8_t FEP_gets(char *str, size_t len) {
     return data_mode;
 }
 
+uint8_t FEP_getTransmitterAddr(void) {
+    return FEP_transmitterAddr;
+}
+
 uint8_t FEP_flushFEP(void) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@BCL\r\n"));
 
@@ -286,28 +297,19 @@ uint8_t FEP_flushFEP(void) {
 
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
 
     return response;
-}
-
-void FEP_flushAVR(uint16_t n) {
-    (*FEP_uart_flush)(n);
 }
 
 uint8_t FEP_getReg(uint8_t reg_num) {
     char buf[6];
     uint8_t val;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     fprintf_P(&fepio, PSTR("@REG%02d\r\n"), reg_num);
 
     FEP_waitResponseStr(buf, 3);
 
     sscanf_P(buf, PSTR("%XH"), &val);
-
-    FEP_busyFlag = 0;
 
     return val;
 }
@@ -315,8 +317,6 @@ uint8_t FEP_getReg(uint8_t reg_num) {
 uint8_t FEP_setReg(uint8_t reg_num, uint8_t val) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@REG%02d:%03d\r\n"), reg_num, val);
 
@@ -324,7 +324,6 @@ uint8_t FEP_setReg(uint8_t reg_num, uint8_t val) {
 
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
 
     FEP_reset();
     return response;
@@ -352,15 +351,11 @@ uint8_t FEP_getFrq1(uint8_t ch) {
     char buf[5];
     uint8_t band;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     fprintf_P(&fepio, PSTR("@FRQ%d\r\n"), ch);
 
     FEP_waitResponseStr(buf, 2);
 
     sscanf_P(buf, PSTR("%d"), &band);
-
-    FEP_busyFlag = 0;
 
     return band;
 }
@@ -376,8 +371,6 @@ uint8_t FEP_setFrq(uint8_t ch1, uint8_t ch2, uint8_t ch3) {
 uint8_t FEP_setFrq1(uint8_t ch, uint8_t band) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@FRQ%1d:%02d\r\n"), ch, band);
 
@@ -385,7 +378,6 @@ uint8_t FEP_setFrq1(uint8_t ch, uint8_t band) {
 
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
 
     return response;
 }
@@ -394,15 +386,11 @@ uint16_t FEP_getID(void) {
     char buf[8];
     uint16_t id;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     fprintf_P(&fepio, PSTR("@IDR\r\n"));
 
     FEP_waitResponseStr(buf, 5);
 
     sscanf_P(buf, PSTR("%XH"), &id);
-
-    FEP_busyFlag = 0;
 
     return id;
 }
@@ -410,8 +398,6 @@ uint16_t FEP_getID(void) {
 uint8_t FEP_setID(uint16_t id) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@IDW%4XH\r\n"), id);
 
@@ -419,7 +405,6 @@ uint8_t FEP_setID(uint16_t id) {
 
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
 
     return response;
 }
@@ -427,8 +412,6 @@ uint8_t FEP_setID(uint16_t id) {
 uint8_t FEP_reset(void) {
     uint8_t response, i;
 
-    FEP_busyFlag = 1;
-    FEP_flushAVR(0);
     for (i = 0; i < FEP_RETRY; i++) {
         fprintf_P(&fepio, PSTR("@RST\r\n"));
 
@@ -436,19 +419,22 @@ uint8_t FEP_reset(void) {
 
         if (response == FEP_P0) break;
     }
-    FEP_busyFlag = 0;
 
     return response;
 }
 
 uint8_t FEP_waitResponse(void) {
     uint16_t i;
-    char buf[16];
+    char buf[258];
 
     for(i = 0; i < FEP_TIMEOUT_MS; i++) {
-        if ((*FEP_uart_available)() >= 4) {
+        if (FEP_available()) {
             /* get response */
-            fgets(buf, sizeof(buf), &fepio);
+            FEP_fgets(buf, sizeof(buf), &fepio);
+            if (strlen(buf) > 4) {
+                /* the packet in buffer is not response, continue to wait */
+                continue;
+            }
 
             if (strcmp(buf, "P1\r\n") == 0) {
                 return FEP_waitResponse();
@@ -476,18 +462,34 @@ uint8_t FEP_waitResponse(void) {
 
 char *FEP_waitResponseStr(char *buf, size_t len) {
     size_t i;
+    char * ret;
 
-    for(i = 0; i < FEP_TIMEOUT_MS && (*FEP_uart_available)() < len; i++) {
-        _delay_ms(1);
+    for(i = 0; i < FEP_TIMEOUT_MS; i++) {
+        if (FEP_available()) {
+            /* get latest packet */
+            ret = FEP_fgets(buf, len + 2 + 1, &fepio);
+
+            /* check whether the packet is message from other transmitter or not */
+            if (buf[0] == 'R' &&
+                (buf[1] == 'B' || buf[1] == 'X') &&
+                (buf[2] == 'N' || buf[2] == 'R' || buf[2] == 'T' || buf[2] == '2'))
+            {
+                continue;
+            }
+        } else {
+            _delay_ms(1);
+        }
     }
 
-    return fgets(buf, len + 2 + 1, &fepio);
+    return ret;
 }
 
 int FEP_io_getchar(FILE *stream) {
     uint16_t status, data;
 
-    while ((*FEP_uart_available)() <= 0) ;
+    if ((*FEP_uart_available)() <= 0) {
+        return _FDEV_ERR;
+    }
 
     data = (*FEP_uart_getc)();
     status = data >> 8;
@@ -501,18 +503,48 @@ int FEP_io_putchar(char c, FILE *stream) {
     return 0;
 }
 
+char *FEP_fgets(char * s, int n, FILE * stream) {
+    int i;
+    char *ret;
+
+    cli();
+    if (FEP_available()) {
+        for (i = 0; i < FEP_LINE_LEN - 3 && !(FEP_latestPacket[i] == '\r' && FEP_latestPacket[i + 1] == '\n' && FEP_latestPacket[i + 2] == '\0'); i++) {
+            s[i] = FEP_latestPacket[i];
+        }
+        s[i] = '\r';
+        s[i + 1] = '\n';
+        s[i + 2] = '\0';
+        ret = s;
+        FEP_availableFlag = 0;
+    } else {
+        ret = NULL;
+    }
+    sei();
+
+    return ret;
+}
+
 uint16_t FEP_available(void) {
-	return FEP_availablePacket;
+	return FEP_availableFlag;
 }
 
 void FEP_rxHandler(uint8_t data, uint8_t error) {
-    FEP_currentByte++;
+    static uint8_t FEP_lastRxData = '\0';
 
-    if (!FEP_busyFlag && FEP_lastRxData == '\r' && data == '\n') {
-        FEP_discardableByte += FEP_prevByte;
-        FEP_prevByte = FEP_currentByte;
-        FEP_currentByte = 0;
-        FEP_availablePacket++;
+    if (FEP_lastRxData == '\r' && data == '\n') {
+        /* received terminator */
+        uint16_t status, data, i;
+
+        /* move data to buffer which stores a latest packet */
+        for (i = 0; i < FEP_LINE_LEN - 1 && (*FEP_uart_available)() > 0; i++) {
+            data = (*FEP_uart_getc)();
+            status = data >> 8;
+            data = (data & 0xff);
+            FEP_latestPacket[i] = data;
+        }
+        FEP_latestPacket[i] = '\0';
+        FEP_availableFlag = 1;
     }
 
     FEP_lastRxData = data;

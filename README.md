@@ -2,7 +2,8 @@
 
 Library for [FEP-01 and FEP-02](http://www.futaba.co.jp/industry/industry_module/fep01/)
 
-This library had been tested on mega1284p and mega164p. Compatibility depends on [avr-uart library](https://github.com/FlechaMaker/avr-uart).
+This library had been tested on mega1284p. Compatibility depends on [avr-uart library](https://github.com/FlechaMaker/avr-uart). Please note that
+this library uses large flash and SRAM.
 
 ## Functions
 

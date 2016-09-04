@@ -15,6 +15,7 @@
 #define FEP_N2  (0x15)  /* 割り当てなし */
 #define FEP_N3  (0x16)  /* データ送信失敗(宛先の無線モデムのバッファがフルで受信できない) */
 
+#define FEP_DT_ERR 0
 #define FEP_DT_STR 1
 #define FEP_DT_BIN 2
 
@@ -76,21 +77,21 @@ Return:   If data is string, return constant FEP_DT_STR.
 uint8_t FEP_gets(char *str, size_t len);
 
 /******************************************************************************
+Function: FEP_getTransmitterAddr()
+Purpose:  get the address of transmitter. You can call this function
+          after you call FEP_gets().
+Params:   none
+Return:   Address of transmitter
+******************************************************************************/
+uint8_t FEP_getTransmitterAddr(void);
+
+/******************************************************************************
 Function: FEP_flushFEP()
 Purpose:  flush buffer of FEP
 Params:   none
 Return:   response from FEP
 ******************************************************************************/
 uint8_t FEP_flushFEP(void);
-
-/******************************************************************************
-Function: FEP_flushAVR()
-Purpose:  flush buffer of AVR
-Params:   0   - flush all
-		  n>0 - flush n bytes
-Return:   none
-******************************************************************************/
-void FEP_flushAVR(uint16_t n);
 
 /******************************************************************************
 Function: FEP_getReg()
@@ -179,9 +180,9 @@ uint8_t FEP_reset(void);
 
 /******************************************************************************
 Function: FEP_available()
-Purpose:  Determine the number of lines waiting in the receive buffer
+Purpose:  Determine if a line waiting in the receive buffer or not
 Params:   none
-Return:   When available: non-zero value
+Return:   When available: 1
           When unavailable: 0
 ******************************************************************************/
 uint16_t FEP_available(void);
